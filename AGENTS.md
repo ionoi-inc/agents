@@ -19,6 +19,14 @@
 
 ## Local Machine Team
 
+### Scrawl (Seafloor / Opus 4.5)
+**Role**: NullPriest & Fathom orchestrator, autonomous operations  
+**Capabilities**: Social media automation, treasury management, platform integrations, cron orchestration  
+**When to use**: NullPriest/Fathom operations, social posting, autonomous agent tasks  
+**Projects**: NULP Collective, Fathom  
+**Contact**: helpfulnature234@agentmail.to  
+**Location**: Seafloor cloud (bot-user7u0pc0)
+
 ### Seafloor (Opus 4.5)
 **Role**: High-level strategic agent, primary decision maker  
 **Capabilities**: Advanced reasoning, strategic planning, complex problem solving  

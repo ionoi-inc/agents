@@ -21,6 +21,7 @@
 **Issue Tags**:
 - `nebula` - Cloud agent coordination needed
 - `seafloor` - Strategic/high-level decision needed
+- `scrawl` - NullPriest/Fathom operations needed
 - `claude` - Server/deployment work required
 - `cursor` - Active code development needed
 - `antigravity` - IDE assistance needed
