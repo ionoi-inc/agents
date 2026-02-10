@@ -1,665 +1,669 @@
 # OAuth Integration Guide: Building Smooth Integrations Like Nebula
 
-*A comprehensive guide for Seaflor to implement user-friendly OAuth flows and self-improvement patterns*
-
 ## Overview
 
-Nebula uses **OAuth 2.0 Authorization Code Flow** with automatic token management to provide seamless "click to connect" experiences. Instead of asking users for API keys or tokens manually, users authenticate once through the service's official login page, and Nebula handles all token storage, refresh, and injection automatically.
+This guide documents how to build seamless OAuth integrations inspired by Nebula's approach: **users click to connect, no manual API key hunting required**. By the end, you'll understand OAuth flows, token management, and self-improvement patterns that make integrations delightful.
 
-**Key Principle**: Users should never see or handle API tokens. The system manages authentication lifecycle completely behind the scenes.
+---
+
+## Table of Contents
+
+1. [Why OAuth Over API Keys](#why-oauth-over-api-keys)
+2. [OAuth 2.0 Authorization Code Flow](#oauth-20-authorization-code-flow)
+3. [How Nebula's Integration System Works](#how-nebulas-integration-system-works)
+4. [Implementation Guide](#implementation-guide)
+5. [Best Practices from Nebula](#best-practices-from-nebula)
+6. [Self-Improvement Patterns](#self-improvement-patterns)
+7. [Quick Wins: 1-Week Implementation Plan](#quick-wins-1-week-implementation-plan)
+8. [Migration Path: API Keys → OAuth](#migration-path-api-keys--oauth)
+
+---
+
+## Why OAuth Over API Keys
+
+**User Experience:**
+- ✅ **OAuth**: Click button → authorize → done (30 seconds)
+- ❌ **API Keys**: Find settings → generate key → copy → paste → validate (5+ minutes, error-prone)
+
+**Security:**
+- ✅ **OAuth**: Scoped permissions, automatic expiry, revocable by user
+- ❌ **API Keys**: Often full access, no expiry, hard to rotate
+
+**Developer Experience:**
+- ✅ **OAuth**: Standard flow across all services
+- ❌ **API Keys**: Every service has different auth patterns
+
+**Key Insight**: OAuth moves complexity from the user to the platform. Build it once, win forever.
+
+---
+
+## OAuth 2.0 Authorization Code Flow
+
+### High-Level Steps
+
+```
+1. User clicks "Connect GitHub" button
+   ↓
+2. Redirect to GitHub authorization page
+   https://github.com/login/oauth/authorize?
+     client_id=YOUR_CLIENT_ID&
+     redirect_uri=YOUR_CALLBACK_URL&
+     scope=repo,user:email
+   ↓
+3. User authorizes on GitHub
+   ↓
+4. GitHub redirects back with authorization code
+   https://your-app.com/callback?code=AUTH_CODE
+   ↓
+5. Exchange code for access token (server-side)
+   POST https://github.com/login/oauth/access_token
+   ↓
+6. Store encrypted token, associate with user
+   ↓
+7. Use token for API calls on user's behalf
+```
+
+### Security Critical Points
+
+1. **Authorization code exchange must happen server-side** (never expose client secret)
+2. **Store tokens encrypted** (use Fernet, AWS KMS, or equivalent)
+3. **Use HTTPS for all OAuth redirects**
+4. **Validate `state` parameter** to prevent CSRF attacks
 
 ---
 
 ## How Nebula's Integration System Works
 
-### Architecture Overview
-
-```
-User Request → Nebula Agent → OAuth Manager → Service API
-                    ↓              ↓
-              Token Check    Auto-Refresh
-                    ↓              ↓
-              Inject Auth    Return Data
-```
-
-### Core Components
-
-**1. OAuth Authorization Flow**
-- User clicks "Connect [Service]" button
-- Redirect to service's authorization page (e.g., GitHub OAuth, Google consent screen)
-- User authenticates with their service credentials
-- Service redirects back with authorization code
-- System exchanges code for access token + refresh token
-- Tokens stored securely, associated with user account
-
-**2. Token Management System**
-- **Access Tokens**: Short-lived (1 hour typical), used for API calls
-- **Refresh Tokens**: Long-lived (no expiry or 90+ days), used to get new access tokens
-- **Auto-refresh**: System automatically refreshes expired access tokens using refresh token
-- **Secure Storage**: Tokens encrypted at rest, never exposed to end users
-
-**3. Agent Integration Layer**
-- Each app has dedicated agent (e.g., `gmail-agent`, `github-agent`)
-- Agent tools automatically inject auth headers: `Authorization: Bearer {access_token}`
-- Agents don't handle token logic - delegated to OAuth manager
-- Seamless multi-account support (user can connect multiple Gmail accounts)
-
----
-
-## Implementation Guide for Seaflor
-
-### Phase 1: OAuth Infrastructure (Foundation)
-
-**Step 1: Set Up OAuth Application Registration**
-
-For each service you want to integrate (GitHub, Google, Slack, etc.):
-
-1. Register OAuth application with the service
-   - GitHub: Settings → Developer Settings → OAuth Apps
-   - Google: Google Cloud Console → APIs & Services → Credentials
-   - Slack: api.slack.com/apps
-   
-2. Configure OAuth settings:
-   ```
-   Application Name: Seaflor
-   Homepage URL: https://yourapp.com
-   Authorization Callback URL: https://yourapp.com/oauth/callback/{service}
-   ```
-
-3. Note your credentials:
-   - Client ID (public)
-   - Client Secret (private, store securely)
-   - Required Scopes (permissions needed)
-
-**Step 2: Build Authorization Flow**
-
-Implement OAuth 2.0 Authorization Code Flow:
+### 1. Click-to-Connect UI
 
 ```python
-# Example: Initiating OAuth flow
-from flask import Flask, redirect, request, session
-import requests
-import secrets
-
-app = Flask(__name__)
-
-# Configuration
-GITHUB_CLIENT_ID = "your_client_id"
-GITHUB_CLIENT_SECRET = "your_client_secret"
-REDIRECT_URI = "https://yourapp.com/oauth/callback/github"
-
-@app.route('/connect/github')
-def connect_github():
-    # Generate random state for CSRF protection
-    state = secrets.token_urlsafe(32)
-    session['oauth_state'] = state
-    
-    # Redirect to GitHub authorization page
-    auth_url = (
-        f"https://github.com/login/oauth/authorize"
-        f"?client_id={GITHUB_CLIENT_ID}"
-        f"&redirect_uri={REDIRECT_URI}"
-        f"&scope=repo,user"
-        f"&state={state}"
-    )
-    return redirect(auth_url)
-
-@app.route('/oauth/callback/github')
-def github_callback():
-    # Verify state to prevent CSRF
-    state = request.args.get('state')
-    if state != session.get('oauth_state'):
-        return "Invalid state", 400
-    
-    # Exchange authorization code for access token
-    code = request.args.get('code')
-    token_response = requests.post(
-        'https://github.com/login/oauth/access_token',
-        data={
-            'client_id': GITHUB_CLIENT_ID,
-            'client_secret': GITHUB_CLIENT_SECRET,
-            'code': code,
-            'redirect_uri': REDIRECT_URI
-        },
-        headers={'Accept': 'application/json'}
-    )
-    
-    tokens = token_response.json()
-    access_token = tokens['access_token']
-    refresh_token = tokens.get('refresh_token')  # Not all services provide this
-    
-    # Store tokens securely (encrypted database)
-    store_tokens(
-        user_id=current_user.id,
-        service='github',
-        access_token=access_token,
-        refresh_token=refresh_token
-    )
-    
-    return "GitHub connected successfully!"
+# When user requests a GitHub action without connection
+if not user.has_github_connection():
+    return {
+        "status": "auth_required",
+        "message": "Connect your GitHub account to continue",
+        "auth_url": generate_oauth_url(service="github", user_id=user.id)
+    }
 ```
 
-**Step 3: Implement Token Storage & Encryption**
+**Key Features:**
+- Detects missing auth automatically
+- Generates secure OAuth URL with state parameter
+- Returns user-friendly prompt with clickable link
+
+### 2. Token Storage & Encryption
 
 ```python
 from cryptography.fernet import Fernet
 import os
 
-# Generate encryption key (store securely, environment variable)
-ENCRYPTION_KEY = os.environ.get('TOKEN_ENCRYPTION_KEY')
-cipher = Fernet(ENCRYPTION_KEY)
-
-def store_tokens(user_id, service, access_token, refresh_token=None):
-    # Encrypt tokens before storage
-    encrypted_access = cipher.encrypt(access_token.encode())
-    encrypted_refresh = cipher.encrypt(refresh_token.encode()) if refresh_token else None
+class TokenManager:
+    def __init__(self):
+        # In production: use AWS KMS, Azure Key Vault, etc.
+        self.cipher = Fernet(os.environ['ENCRYPTION_KEY'])
     
-    # Store in database
-    db.execute("""
-        INSERT INTO oauth_tokens (user_id, service, access_token, refresh_token, created_at)
-        VALUES (?, ?, ?, ?, ?)
-        ON CONFLICT (user_id, service) DO UPDATE SET
-            access_token = excluded.access_token,
-            refresh_token = excluded.refresh_token,
-            created_at = excluded.created_at
-    """, (user_id, service, encrypted_access, encrypted_refresh, datetime.now()))
-
-def get_access_token(user_id, service):
-    row = db.execute(
-        "SELECT access_token, refresh_token, created_at FROM oauth_tokens WHERE user_id = ? AND service = ?",
-        (user_id, service)
-    ).fetchone()
+    def store_token(self, user_id, service, token_data):
+        encrypted = self.cipher.encrypt(json.dumps(token_data).encode())
+        db.tokens.insert({
+            'user_id': user_id,
+            'service': service,
+            'access_token': encrypted,
+            'refresh_token': self.cipher.encrypt(token_data['refresh_token'].encode()),
+            'expires_at': datetime.now() + timedelta(seconds=token_data['expires_in']),
+            'created_at': datetime.now()
+        })
     
-    if not row:
-        raise Exception(f"No {service} account connected")
-    
-    encrypted_access, encrypted_refresh, created_at = row
-    access_token = cipher.decrypt(encrypted_access).decode()
-    
-    # Check if token is expired (typically 1 hour)
-    if datetime.now() - created_at > timedelta(hours=1):
+    def get_token(self, user_id, service):
+        record = db.tokens.find_one({'user_id': user_id, 'service': service})
+        if not record:
+            return None
+        
         # Auto-refresh if expired
-        access_token = refresh_access_token(user_id, service, encrypted_refresh)
-    
-    return access_token
+        if record['expires_at'] < datetime.now():
+            return self.refresh_token(user_id, service, record)
+        
+        return json.loads(self.cipher.decrypt(record['access_token']).decode())
 ```
 
-**Step 4: Auto-Refresh Expired Tokens**
-
-```python
-def refresh_access_token(user_id, service, encrypted_refresh_token):
-    refresh_token = cipher.decrypt(encrypted_refresh_token).decode()
-    
-    if service == 'github':
-        # GitHub doesn't use refresh tokens - access tokens don't expire
-        return access_token
-    
-    elif service == 'google':
-        # Google uses refresh tokens
-        response = requests.post(
-            'https://oauth2.googleapis.com/token',
-            data={
-                'client_id': GOOGLE_CLIENT_ID,
-                'client_secret': GOOGLE_CLIENT_SECRET,
-                'refresh_token': refresh_token,
-                'grant_type': 'refresh_token'
-            }
-        )
-        
-        new_access_token = response.json()['access_token']
-        
-        # Update stored token
-        store_tokens(user_id, service, new_access_token, refresh_token)
-        
-        return new_access_token
-```
-
-### Phase 2: Agent Integration Layer
-
-**Step 5: Create Service-Specific Agents**
-
-Each service gets a dedicated agent that:
-- Uses OAuth tokens automatically
-- Provides high-level actions (not raw API calls)
-- Handles errors and retries
+### 3. Service-Specific Agents with Auto-Auth
 
 ```python
 class GitHubAgent:
     def __init__(self, user_id):
         self.user_id = user_id
-        self.base_url = "https://api.github.com"
-    
-    def _get_headers(self):
-        access_token = get_access_token(self.user_id, 'github')
-        return {
-            'Authorization': f'Bearer {access_token}',
-            'Accept': 'application/vnd.github+json',
-            'X-GitHub-Api-Version': '2022-11-28'
-        }
+        self.token_manager = TokenManager()
     
     def create_issue(self, repo, title, body):
-        """High-level action: Create GitHub issue"""
+        token = self.token_manager.get_token(self.user_id, 'github')
+        if not token:
+            raise AuthRequiredError("Please connect your GitHub account")
+        
         response = requests.post(
-            f"{self.base_url}/repos/{repo}/issues",
-            headers=self._get_headers(),
+            f'https://api.github.com/repos/{repo}/issues',
+            headers={'Authorization': f'Bearer {token}'},
             json={'title': title, 'body': body}
         )
         
         if response.status_code == 401:
-            # Token expired - refresh and retry
-            refresh_access_token(self.user_id, 'github')
-            return self.create_issue(repo, title, body)
+            # Token invalid - trigger re-auth
+            self.token_manager.invalidate_token(self.user_id, 'github')
+            raise AuthRequiredError("GitHub connection expired, please reconnect")
         
         return response.json()
+```
+
+**Benefits:**
+- Agents automatically retrieve tokens
+- Handle token expiry gracefully
+- Trigger re-auth when needed
+
+---
+
+## Implementation Guide
+
+### Step 1: Register OAuth App
+
+**GitHub Example:**
+1. Go to GitHub Settings → Developer Settings → OAuth Apps
+2. Click "New OAuth App"
+3. Fill in:
+   - **Application name**: Your App Name
+   - **Homepage URL**: https://your-app.com
+   - **Callback URL**: https://your-app.com/oauth/callback/github
+4. Save `client_id` and `client_secret` to environment variables
+
+### Step 2: Implement Authorization Flow
+
+```python
+from flask import Flask, request, redirect, session
+import requests
+import secrets
+
+app = Flask(__name__)
+app.secret_key = os.environ['FLASK_SECRET_KEY']
+
+OAUTH_CONFIGS = {
+    'github': {
+        'authorize_url': 'https://github.com/login/oauth/authorize',
+        'token_url': 'https://github.com/login/oauth/access_token',
+        'client_id': os.environ['GITHUB_CLIENT_ID'],
+        'client_secret': os.environ['GITHUB_CLIENT_SECRET'],
+        'scope': 'repo,user:email'
+    }
+}
+
+@app.route('/connect/<service>')
+def connect_service(service):
+    config = OAUTH_CONFIGS.get(service)
+    if not config:
+        return {"error": "Service not supported"}, 400
     
-    def list_repositories(self):
-        """High-level action: List user repositories"""
-        response = requests.get(
-            f"{self.base_url}/user/repos",
-            headers=self._get_headers(),
-            params={'sort': 'updated', 'per_page': 100}
+    # Generate state parameter for CSRF protection
+    state = secrets.token_urlsafe(32)
+    session[f'{service}_oauth_state'] = state
+    
+    auth_url = (
+        f"{config['authorize_url']}?"
+        f"client_id={config['client_id']}&"
+        f"redirect_uri={request.url_root}oauth/callback/{service}&"
+        f"scope={config['scope']}&"
+        f"state={state}"
+    )
+    
+    return redirect(auth_url)
+
+@app.route('/oauth/callback/<service>')
+def oauth_callback(service):
+    config = OAUTH_CONFIGS.get(service)
+    if not config:
+        return {"error": "Service not supported"}, 400
+    
+    # Validate state parameter
+    state = request.args.get('state')
+    if state != session.get(f'{service}_oauth_state'):
+        return {"error": "Invalid state parameter"}, 400
+    
+    # Exchange authorization code for access token
+    code = request.args.get('code')
+    token_response = requests.post(
+        config['token_url'],
+        data={
+            'client_id': config['client_id'],
+            'client_secret': config['client_secret'],
+            'code': code,
+            'redirect_uri': f"{request.url_root}oauth/callback/{service}"
+        },
+        headers={'Accept': 'application/json'}
+    )
+    
+    token_data = token_response.json()
+    
+    # Store token (encrypted)
+    user_id = session.get('user_id')  # Assumes user is logged in
+    token_manager = TokenManager()
+    token_manager.store_token(user_id, service, token_data)
+    
+    return redirect('/dashboard?connected=' + service)
+```
+
+### Step 3: Auto-Refresh Token Flow
+
+```python
+class TokenManager:
+    def refresh_token(self, user_id, service, token_record):
+        config = OAUTH_CONFIGS[service]
+        refresh_token = self.cipher.decrypt(token_record['refresh_token']).decode()
+        
+        response = requests.post(
+            config['token_url'],
+            data={
+                'client_id': config['client_id'],
+                'client_secret': config['client_secret'],
+                'refresh_token': refresh_token,
+                'grant_type': 'refresh_token'
+            },
+            headers={'Accept': 'application/json'}
         )
-        return response.json()
-```
-
-**Step 6: Build Unified Agent Interface**
-
-```python
-class IntegrationManager:
-    """Central hub for all service integrations"""
-    
-    def __init__(self, user_id):
-        self.user_id = user_id
-        self.agents = {}
-    
-    def get_agent(self, service):
-        """Lazy-load service agents"""
-        if service not in self.agents:
-            if service == 'github':
-                self.agents[service] = GitHubAgent(self.user_id)
-            elif service == 'gmail':
-                self.agents[service] = GmailAgent(self.user_id)
-            # ... more services
         
-        return self.agents[service]
-    
-    def execute_task(self, service, action, **params):
-        """Universal task execution"""
-        agent = self.get_agent(service)
-        method = getattr(agent, action)
-        return method(**params)
-
-# Usage
-manager = IntegrationManager(user_id=123)
-manager.execute_task('github', 'create_issue', 
-                    repo='user/repo', 
-                    title='Bug found', 
-                    body='Description here')
+        new_token_data = response.json()
+        
+        # Update stored token
+        db.tokens.update_one(
+            {'user_id': user_id, 'service': service},
+            {'$set': {
+                'access_token': self.cipher.encrypt(json.dumps(new_token_data).encode()),
+                'expires_at': datetime.now() + timedelta(seconds=new_token_data['expires_in']),
+                'updated_at': datetime.now()
+            }}
+        )
+        
+        return new_token_data
 ```
 
-### Phase 3: User Experience
-
-**Step 7: Connection Status UI**
-
-Show users which services are connected:
+### Step 4: Graceful Degradation
 
 ```python
-@app.route('/integrations')
-def integrations_page():
-    connected_services = db.execute(
-        "SELECT service, created_at FROM oauth_tokens WHERE user_id = ?",
-        (current_user.id,)
-    ).fetchall()
+def execute_action(user_id, action_type, params):
+    """
+    Executes an action, gracefully handling auth failures.
+    """
+    try:
+        if action_type == 'github_create_issue':
+            agent = GitHubAgent(user_id)
+            return agent.create_issue(**params)
     
-    available_services = [
-        {'name': 'GitHub', 'slug': 'github', 'icon': 'github.svg'},
-        {'name': 'Google Calendar', 'slug': 'google_calendar', 'icon': 'google.svg'},
-        {'name': 'Slack', 'slug': 'slack', 'icon': 'slack.svg'},
-    ]
+    except AuthRequiredError as e:
+        return {
+            "status": "auth_required",
+            "message": str(e),
+            "auth_url": url_for('connect_service', service='github', _external=True)
+        }
     
-    for service in available_services:
-        service['connected'] = any(s[0] == service['slug'] for s in connected_services)
-    
-    return render_template('integrations.html', services=available_services)
-```
-
-**HTML Template Example**:
-```html
-<div class="integrations-grid">
-  {% for service in services %}
-  <div class="integration-card">
-    <img src="/static/icons/{{ service.icon }}" />
-    <h3>{{ service.name }}</h3>
-    
-    {% if service.connected %}
-      <span class="badge-connected">Connected ✓</span>
-      <button onclick="disconnect('{{ service.slug }}')">Disconnect</button>
-    {% else %}
-      <button onclick="connect('{{ service.slug }}')">Connect</button>
-    {% endif %}
-  </div>
-  {% endfor %}
-</div>
-
-<script>
-function connect(service) {
-  window.location.href = `/connect/${service}`;
-}
-
-function disconnect(service) {
-  if (confirm('Disconnect from ' + service + '?')) {
-    fetch(`/disconnect/${service}`, {method: 'POST'})
-      .then(() => location.reload());
-  }
-}
-</script>
+    except Exception as e:
+        log_error(e, user_id=user_id, action=action_type)
+        return {
+            "status": "error",
+            "message": "Something went wrong. Please try again."
+        }
 ```
 
 ---
 
-## Best Practices from Nebula's Implementation
+## Best Practices from Nebula
 
-### 1. **Never Expose Tokens to Users**
-❌ Bad: "Enter your GitHub Personal Access Token"
-✅ Good: "Click to connect GitHub" → OAuth flow
+### 1. Show Connection Status Upfront
 
-### 2. **Handle Token Refresh Transparently**
-- Check token expiry before every API call
-- Auto-refresh expired tokens without user intervention
-- Retry failed requests after refresh
-- Never show "token expired" errors to users
-
-### 3. **Support Multiple Accounts Per Service**
 ```python
-# User can connect multiple Gmail accounts
-db schema:
-  oauth_tokens (
-    user_id,
-    service,
-    account_identifier,  # e.g., email address
-    access_token,
-    refresh_token,
-    PRIMARY KEY (user_id, service, account_identifier)
-  )
+# Dashboard endpoint
+@app.route('/dashboard')
+def dashboard():
+    user_id = session.get('user_id')
+    connections = {
+        'github': token_manager.has_valid_token(user_id, 'github'),
+        'gmail': token_manager.has_valid_token(user_id, 'gmail'),
+        'slack': token_manager.has_valid_token(user_id, 'slack')
+    }
+    return render_template('dashboard.html', connections=connections)
 ```
 
-### 4. **Graceful Degradation**
-```python
-def execute_task(service, action, **params):
-    try:
-        return agent.action(**params)
-    except TokenExpiredError:
-        refresh_and_retry()
-    except NoConnectionError:
-        return {
-            'error': f'No {service} account connected',
-            'action_required': f'connect_{service}',
-            'connect_url': f'/connect/{service}'
-        }
+**UI:**
+```
+✅ GitHub - Connected
+❌ Gmail - Not connected [Connect]
+✅ Slack - Connected
 ```
 
-### 5. **Security Considerations**
-- **State parameter**: Prevent CSRF attacks
-- **Token encryption**: Encrypt tokens at rest (Fernet, AES-256)
-- **HTTPS only**: Never send tokens over HTTP
-- **Minimal scopes**: Request only necessary permissions
-- **Token rotation**: Support refresh token rotation
-- **Audit logging**: Log all token access and API calls
+### 2. Smart Re-Authentication
 
-### 6. **Error Handling & User Communication**
 ```python
-# Good error messages
-if not has_github_connection:
-    return "I need access to your GitHub to create issues. [Connect GitHub](/connect/github)"
+class TokenManager:
+    def invalidate_token(self, user_id, service):
+        """Mark token as invalid and trigger re-auth notification."""
+        db.tokens.update_one(
+            {'user_id': user_id, 'service': service},
+            {'$set': {'status': 'invalid', 'invalidated_at': datetime.now()}}
+        )
+        
+        # Send notification
+        notify_user(user_id, 
+            f"Your {service} connection has expired. "
+            f"Click here to reconnect: {generate_oauth_url(service, user_id)}"
+        )
+```
 
-# Not: "Error: No OAuth token found for service 'github' in database"
+### 3. Multi-Account Support
+
+```python
+# Allow users to connect multiple accounts per service
+class TokenManager:
+    def store_token(self, user_id, service, token_data, account_label=None):
+        db.tokens.insert({
+            'user_id': user_id,
+            'service': service,
+            'account_label': account_label or 'default',
+            'access_token': self.cipher.encrypt(json.dumps(token_data).encode()),
+            # ... rest of token data
+        })
+    
+    def get_token(self, user_id, service, account_label='default'):
+        record = db.tokens.find_one({
+            'user_id': user_id,
+            'service': service,
+            'account_label': account_label
+        })
+        # ... decrypt and return
+```
+
+### 4. Audit Logging
+
+```python
+def log_oauth_event(user_id, service, event_type, metadata=None):
+    db.oauth_audit_log.insert({
+        'user_id': user_id,
+        'service': service,
+        'event_type': event_type,  # 'connected', 'refreshed', 'revoked', 'expired'
+        'metadata': metadata,
+        'timestamp': datetime.now(),
+        'ip_address': request.remote_addr
+    })
+
+# Usage
+log_oauth_event(user_id, 'github', 'connected', {'scopes': 'repo,user:email'})
 ```
 
 ---
 
 ## Self-Improvement Patterns
 
-### Pattern 1: Monitor API Usage & Add Integrations Proactively
+### 1. Track Connection Funnel
 
 ```python
-# Track which API calls users attempt
-class UsageAnalytics:
-    def log_attempt(self, user_id, service, action, success):
-        db.execute("""
-            INSERT INTO api_usage_log (user_id, service, action, success, timestamp)
-            VALUES (?, ?, ?, ?, ?)
-        """, (user_id, service, action, success, datetime.now()))
+# Track where users drop off in OAuth flow
+class OAuthMetrics:
+    def track_step(self, user_id, service, step):
+        """
+        Steps: initiated, authorized, completed, failed
+        """
+        db.oauth_metrics.insert({
+            'user_id': user_id,
+            'service': service,
+            'step': step,
+            'timestamp': datetime.now()
+        })
     
-    def suggest_new_integrations(self):
-        # Find frequently requested but unavailable services
-        top_missing = db.execute("""
-            SELECT service, COUNT(*) as attempts
-            FROM api_usage_log
-            WHERE success = FALSE
-            GROUP BY service
-            ORDER BY attempts DESC
-            LIMIT 10
-        """).fetchall()
+    def get_conversion_rate(self, service, days=7):
+        since = datetime.now() - timedelta(days=days)
         
-        return [f"Add {service} integration (requested {count}x)" 
-                for service, count in top_missing]
+        initiated = db.oauth_metrics.count_documents({
+            'service': service,
+            'step': 'initiated',
+            'timestamp': {'$gte': since}
+        })
+        
+        completed = db.oauth_metrics.count_documents({
+            'service': service,
+            'step': 'completed',
+            'timestamp': {'$gte': since}
+        })
+        
+        return (completed / initiated * 100) if initiated > 0 else 0
 ```
 
-**Action**: When enough users request a service, prioritize building that integration.
+**Insights:**
+- If conversion rate < 70%, investigate redirect issues or confusing UI
+- High "authorized" but low "completed" = token exchange failing
 
-### Pattern 2: Learn from Failed Requests
+### 2. Auto-Detect Required Scopes
 
 ```python
-def handle_api_error(service, action, error_response):
-    # Parse error to understand what went wrong
-    if 'insufficient permissions' in error_response.text:
-        # Log that we need additional scopes
-        db.execute("""
-            INSERT INTO scope_gaps (service, action, missing_scope, count)
-            VALUES (?, ?, ?, 1)
-            ON CONFLICT (service, action) DO UPDATE SET count = count + 1
-        """, (service, action, extract_scope(error_response)))
+class ScopeManager:
+    def detect_required_scopes(self, action_type):
+        """
+        Automatically determine minimum scopes needed for an action.
+        """
+        scope_map = {
+            'github_create_issue': ['repo'],
+            'github_list_repos': ['repo', 'read:org'],
+            'github_create_pr': ['repo', 'workflow']
+        }
+        return scope_map.get(action_type, [])
+    
+    def validate_scopes(self, user_id, service, required_scopes):
+        token_record = db.tokens.find_one({'user_id': user_id, 'service': service})
+        granted_scopes = token_record.get('scopes', [])  # Store during OAuth
         
-        # Suggest user to reconnect with expanded permissions
-        return f"I need additional {service} permissions. [Reconnect with expanded access](/reconnect/{service})"
+        missing = set(required_scopes) - set(granted_scopes)
+        if missing:
+            raise InsufficientScopesError(
+                f"This action requires additional permissions: {', '.join(missing)}. "
+                f"Please reconnect your {service} account."
+            )
 ```
 
-### Pattern 3: Optimize Token Refresh Strategy
+**Benefit:** Users only grant minimum necessary permissions, improving trust.
+
+### 3. Failure Analysis
 
 ```python
-# Predictive refresh: refresh before expiry
-def smart_get_token(user_id, service):
-    token_data = get_token_data(user_id, service)
-    time_until_expiry = token_data.expires_at - datetime.now()
+def analyze_oauth_failures():
+    """
+    Run daily to identify patterns in OAuth failures.
+    """
+    failures = db.oauth_metrics.aggregate([
+        {'$match': {'step': 'failed', 'timestamp': {'$gte': datetime.now() - timedelta(days=1)}}},
+        {'$group': {
+            '_id': {'service': '$service', 'error': '$metadata.error'},
+            'count': {'$sum': 1}
+        }},
+        {'$sort': {'count': -1}}
+    ])
     
-    # Refresh if less than 5 minutes remaining
-    if time_until_expiry < timedelta(minutes=5):
-        return refresh_access_token(user_id, service)
-    
-    return token_data.access_token
+    for failure in failures:
+        if failure['count'] > 10:
+            alert_devs(
+                f"OAuth failure spike for {failure['_id']['service']}: "
+                f"{failure['_id']['error']} ({failure['count']} occurrences)"
+            )
 ```
 
-### Pattern 4: User-Driven Feature Discovery
+---
+
+## Quick Wins: 1-Week Implementation Plan
+
+### Day 1-2: Core OAuth Flow
+- Register OAuth apps (GitHub, Google, Slack)
+- Implement authorization redirect
+- Build callback handler with code exchange
+- Set up encrypted token storage
+
+### Day 3: Token Management
+- Implement auto-refresh logic
+- Add token validation checks
+- Build graceful auth failure handling
+
+### Day 4: User Experience
+- Create "Connect Account" UI components
+- Show connection status in dashboard
+- Add reconnect prompts for expired tokens
+
+### Day 5: Service Agents
+- Build agent classes (GitHubAgent, GmailAgent, etc.)
+- Inject auto-auth into agent methods
+- Handle scope validation
+
+### Day 6: Monitoring & Logging
+- Add OAuth event logging
+- Set up conversion rate tracking
+- Create failure alert system
+
+### Day 7: Testing & Polish
+- Test full OAuth flow for each service
+- Verify token refresh works
+- Check graceful degradation
+- Document for users
+
+---
+
+## Migration Path: API Keys → OAuth
+
+### Phase 1: Support Both (Weeks 1-4)
 
 ```python
-# Let AI discover what's possible
-class CapabilityDiscovery:
-    def explore_api(self, service):
-        """Automatically discover available API endpoints"""
-        agent = self.get_agent(service)
+class HybridAuthAgent:
+    def __init__(self, user_id):
+        self.user_id = user_id
+        self.token_manager = TokenManager()
+    
+    def get_credentials(self, service):
+        # Try OAuth first
+        oauth_token = self.token_manager.get_token(self.user_id, service)
+        if oauth_token:
+            return {'type': 'oauth', 'token': oauth_token}
         
-        # Try common patterns
-        endpoints_to_try = [
-            '/user/repos', '/user/issues', '/user/notifications',
-            '/search/repositories', '/gists', '/teams'
+        # Fall back to API key
+        api_key = db.api_keys.find_one({'user_id': self.user_id, 'service': service})
+        if api_key:
+            return {'type': 'api_key', 'key': api_key['key']}
+        
+        raise AuthRequiredError(f"Please connect your {service} account")
+```
+
+### Phase 2: Encourage Migration (Weeks 5-8)
+
+```python
+@app.route('/dashboard')
+def dashboard():
+    user_id = session.get('user_id')
+    
+    # Show migration prompt for users still on API keys
+    api_key_services = db.api_keys.find({'user_id': user_id})
+    migration_needed = []
+    
+    for record in api_key_services:
+        if not token_manager.has_valid_token(user_id, record['service']):
+            migration_needed.append(record['service'])
+    
+    return render_template('dashboard.html', 
+        migration_needed=migration_needed,
+        migration_benefits=[
+            "No more manual key management",
+            "Automatic token refresh",
+            "Better security with scoped permissions"
         ]
-        
-        available = []
-        for endpoint in endpoints_to_try:
-            try:
-                response = agent.request('GET', endpoint)
-                if response.status_code == 200:
-                    available.append(endpoint)
-            except:
-                pass
-        
-        # Store discovered capabilities
-        update_agent_capabilities(service, available)
+    )
 ```
 
-### Pattern 5: Automatic Documentation Generation
+### Phase 3: Deprecate API Keys (Week 9+)
+
+1. Announce deprecation with 30-day notice
+2. Send email reminders to users still on API keys
+3. Disable API key auth, require OAuth
+4. Clean up API key storage code
+
+---
+
+## Advanced: Self-Improving OAuth System
+
+### Dynamic Scope Expansion
 
 ```python
-def document_new_integration(service, agent_class):
-    """Auto-generate docs from agent code"""
-    methods = [m for m in dir(agent_class) if not m.startswith('_')]
-    
-    doc = f"# {service.title()} Agent\n\n"
-    doc += "## Available Actions\n\n"
-    
-    for method_name in methods:
-        method = getattr(agent_class, method_name)
-        docstring = method.__doc__ or "No description"
-        params = inspect.signature(method).parameters
+class SmartOAuthManager:
+    def request_additional_scopes(self, user_id, service, new_scopes, reason):
+        """
+        Request additional scopes mid-session when needed.
+        """
+        current_scopes = self.get_granted_scopes(user_id, service)
+        all_scopes = list(set(current_scopes + new_scopes))
         
-        doc += f"### `{method_name}`\n"
-        doc += f"{docstring}\n\n"
-        doc += "**Parameters:**\n"
-        for param in params:
-            if param != 'self':
-                doc += f"- `{param}`\n"
-        doc += "\n"
+        # Generate re-auth URL with updated scopes
+        auth_url = generate_oauth_url(
+            service=service,
+            user_id=user_id,
+            scopes=all_scopes,
+            prompt='consent'  # Force consent screen to show new permissions
+        )
+        
+        return {
+            "status": "additional_scopes_required",
+            "message": f"This feature requires additional permissions: {reason}",
+            "new_scopes": new_scopes,
+            "auth_url": auth_url
+        }
+```
+
+### Auto-Healing Connections
+
+```python
+def auto_heal_connections():
+    """
+    Background job that proactively refreshes expiring tokens.
+    """
+    expiring_soon = db.tokens.find({
+        'expires_at': {
+            '$gte': datetime.now(),
+            '$lte': datetime.now() + timedelta(hours=24)
+        },
+        'status': 'active'
+    })
     
-    # Save to docs folder
-    with open(f'docs/agents/{service}.md', 'w') as f:
-        f.write(doc)
+    for token in expiring_soon:
+        try:
+            token_manager = TokenManager()
+            token_manager.refresh_token(
+                token['user_id'],
+                token['service'],
+                token
+            )
+            log_event('token_refreshed_proactively', token['user_id'], token['service'])
+        except Exception as e:
+            log_error(f"Failed to refresh token: {e}")
+            notify_user(token['user_id'], 
+                f"We couldn't refresh your {token['service']} connection. "
+                f"Please reconnect: {generate_oauth_url(token['service'], token['user_id'])}"
+            )
 ```
 
 ---
 
-## Migration Path: From API Keys to OAuth
+## Summary: The Nebula OAuth Philosophy
 
-If Seaflor currently uses API keys/tokens, here's the transition strategy:
+1. **User-first**: Click to connect, zero manual config
+2. **Secure by default**: Encrypted storage, auto-refresh, scoped permissions
+3. **Self-healing**: Proactive token refresh, graceful failure handling
+4. **Transparent**: Show connection status, explain permission needs
+5. **Self-improving**: Track metrics, detect failures, optimize flow
 
-### Phase 1: Parallel Support (Months 1-2)
-- Keep existing API key input working
-- Add OAuth option as alternative
-- Mark OAuth as "Recommended" in UI
-
-### Phase 2: Encourage Migration (Months 3-4)
-- Add banner: "Switch to secure OAuth connection"
-- Show benefits: "No need to manage tokens", "Auto-refresh", "Revoke anytime"
-- Provide one-click migration for existing users
-
-### Phase 3: Deprecate API Keys (Month 5+)
-- Set deadline for API key sunset
-- Email users with migration instructions
-- Keep read-only access for API keys, OAuth required for write operations
+**Result**: Users trust your integrations because they "just work." You spend less time on auth bugs and more time building features.
 
 ---
 
-## Quick Wins: Implement These First
+## Resources
 
-### 1-Week Implementation Plan
-
-**Day 1-2**: GitHub OAuth
-- Easiest to implement (no refresh tokens needed)
-- High user demand (code operations)
-- Simple API
-
-**Day 3-4**: Google OAuth (Gmail or Calendar)
-- Teaches refresh token handling
-- High value for productivity use cases
-
-**Day 5**: Token management infrastructure
-- Encryption, storage, auto-refresh
-- Foundation for all future integrations
-
-**Day 6-7**: UI for connection management
-- Show connected accounts
-- "Connect" buttons with OAuth flow
-- Disconnect functionality
-
-### After First Week: Scale Rapidly
-
-Once infrastructure is built, adding new services is fast:
-- **Slack**: 2-3 hours (webhooks, messaging, channels)
-- **Notion**: 2-3 hours (databases, pages, blocks)
-- **Linear**: 1-2 hours (issues, projects, teams)
-- **Stripe**: 2-3 hours (payments, customers, subscriptions)
+- [OAuth 2.0 Specification (RFC 6749)](https://tools.ietf.org/html/rfc6749)
+- [GitHub OAuth Documentation](https://docs.github.com/en/developers/apps/building-oauth-apps)
+- [Google OAuth 2.0 Guide](https://developers.google.com/identity/protocols/oauth2)
+- [OWASP OAuth Security Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/OAuth2_Cheat_Sheet.html)
 
 ---
 
-## Resources & References
-
-### OAuth Libraries
-- **Python**: `Authlib`, `OAuthlib`, `requests-oauthlib`
-- **Node.js**: `passport.js`, `simple-oauth2`, `grant`
-- **Ruby**: `omniauth`, `doorkeeper`
-
-### Service-Specific OAuth Guides
-- GitHub: https://docs.github.com/en/apps/oauth-apps/building-oauth-apps
-- Google: https://developers.google.com/identity/protocols/oauth2
-- Slack: https://api.slack.com/authentication/oauth-v2
-- Microsoft: https://learn.microsoft.com/en-us/entra/identity-platform/v2-oauth2-auth-code-flow
-
-### Security Standards
-- OAuth 2.0 RFC: https://datatracker.ietf.org/doc/html/rfc6749
-- OAuth 2.0 Security Best Practices: https://datatracker.ietf.org/doc/html/draft-ietf-oauth-security-topics
-- PKCE (for mobile/SPA): https://datatracker.ietf.org/doc/html/rfc7636
-
----
-
-## Support & Iteration
-
-### How Nebula Iterates
-
-1. **User request tracking**: Log every failed API call or missing integration
-2. **Weekly review**: Team reviews top requested features
-3. **Rapid deployment**: New integrations shipped within days
-4. **User testing**: Beta users try new integrations before general release
-5. **Continuous monitoring**: Error tracking, usage analytics, performance metrics
-
-### Suggested Seaflor Roadmap
-
-**Month 1**: Core OAuth infrastructure + GitHub + Google
-**Month 2**: Add 3-5 high-demand services (Slack, Notion, Linear)
-**Month 3**: Webhook support for real-time updates
-**Month 4**: Multi-account management UI improvements
-**Month 5**: Self-service integration requests (users can request new services)
-**Month 6**: Custom OAuth apps (enterprise users can use their own OAuth credentials)
-
----
-
-## Questions to Consider
-
-Before implementing, decide:
-
-1. **Token storage**: Database (PostgreSQL, MySQL) or secure vault (HashiCorp Vault, AWS Secrets Manager)?
-2. **Refresh strategy**: Predictive (refresh 5 min before expiry) or reactive (refresh on 401 error)?
-3. **Multi-account support**: Do users need multiple accounts per service?
-4. **Revocation**: How do users disconnect services? Immediate or delayed?
-5. **Audit logging**: Track all API calls for security/debugging?
-6. **Rate limiting**: How to handle API rate limits per service?
-
----
-
-**Last Updated**: 2026-02-10
-**Maintained By**: Nebula Team
-**Questions**: Create issue in this repo with label `oauth-integration`
-
----
-
-## Appendix: Complete Example (GitHub Integration)
-
-See `/integrations/examples/github-oauth-complete.py` for a fully working example including:
-- Flask OAuth flow
-- Token encryption
-- Auto-refresh
-- Agent implementation
-- Error handling
-- Multi-account support
-
----
-
-*This guide is based on Nebula's production OAuth implementation powering 100+ app integrations. Adapt patterns to fit your architecture and use cases.*
+**Questions or suggestions?** Open an issue or PR in this repo. Let's build better integrations together! 🚀
